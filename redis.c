@@ -2291,8 +2291,8 @@ PHP_METHOD(Redis, multi)
             IF_PIPELINE() {
                 PIPELINE_ENQUEUE_COMMAND(cmd, cmd_len);
                 efree(cmd);
+                REDIS_SAVE_CALLBACK(NULL, NULL);
                 REDIS_ENABLE_MODE(redis_sock, MULTI);
-                REDIS_SAVE_CALLBACK(redis_boolean_response, NULL);
             } else {
                 SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len)
                 efree(cmd);
@@ -2381,8 +2381,8 @@ PHP_METHOD(Redis, exec)
         IF_PIPELINE() {
             PIPELINE_ENQUEUE_COMMAND(cmd, cmd_len);
             efree(cmd);
+            REDIS_SAVE_CALLBACK(NULL, NULL);
             REDIS_DISABLE_MODE(redis_sock, MULTI);
-            REDIS_SAVE_CALLBACK(redis_boolean_response, NULL);
             RETURN_ZVAL(getThis(), 1, 0);
         }
         SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len)
@@ -2444,8 +2444,35 @@ redis_sock_read_multibulk_multi_reply_loop(INTERNAL_FUNCTION_PARAMETERS,
     fold_item *fi;
 
     for (fi = redis_sock->head; fi; fi = fi->next) {
-        fi->fun(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock, z_tab,
-            fi->ctx TSRMLS_CC);
+        if (fi->fun) {
+            fi->fun(INTERNAL_FUNCTION_PARAM_PASSTHRU, redis_sock, z_tab,
+                fi->ctx TSRMLS_CC);
+            continue;
+        }
+        size_t len;
+        char inbuf[255];
+        if (redis_sock_gets(redis_sock, inbuf, sizeof(inbuf) - 1, &len TSRMLS_CC) < 0) {
+        } else if (strncmp(inbuf, "+OK", 3) != 0) {
+        }
+        while ((fi = fi->next) && fi->fun) {
+            if (redis_response_enqueued(redis_sock TSRMLS_CC) == SUCCESS) {
+            } else {
+            }
+        }
+        if (redis_sock_gets(redis_sock, inbuf, sizeof(inbuf) - 1, &len TSRMLS_CC) < 0) {
+        }
+#if (PHP_MAJOR_VERSION < 7)
+        zval *z_ret;
+        MAKE_STD_ZVAL(z_ret);
+#else
+        zval zv, *z_ret = &zv;
+#endif
+        array_init(z_ret);
+        add_next_index_zval(z_tab, z_ret);
+
+        int num = atol(inbuf + 1);
+        if (num > 0 && redis_read_multibulk_recursive(redis_sock, num, z_ret TSRMLS_CC) < 0) {
+        }
     }
     redis_sock->current = fi;
     return 0;

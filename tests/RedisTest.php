@@ -2529,6 +2529,10 @@ class Redis_Test extends TestSuite
             $this->markTestSkipped();
         }
 
+        $ret = $this->redis->pipeline()->multi()->exec()->exec();
+        $this->assertTrue(is_array($ret));
+        $this->assertEquals(1, count($ret)); // empty transaction
+
         $ret = $this->redis->pipeline()
             ->ping()
             ->multi()->set('x', 42)->incr('x')->exec()
