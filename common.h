@@ -602,6 +602,7 @@ typedef struct {
     char           *persistent_id;
 
     int            serializer;
+    int            compression;
     long           dbNumber;
 
     char           *prefix;

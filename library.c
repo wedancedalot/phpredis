@@ -601,7 +601,7 @@ redis_spprintf(RedisSock *redis_sock, short *slot TSRMLS_DC, char **ret, char *k
                 break;
             case 'v':
                 arg.zv = va_arg(ap, zval*);
-                argfree = redis_serialize(redis_sock, arg.zv, &dup, &arglen TSRMLS_CC);
+                argfree = redis_pack(redis_sock, arg.zv, &dup, &arglen TSRMLS_CC);
                 redis_cmd_append_sstr(&cmd, dup, arglen);
                 if (argfree) efree(dup);
                 break;
@@ -707,7 +707,7 @@ int redis_cmd_append_sstr_zval(smart_string *str, zval *z, RedisSock *redis_sock
     strlen_t vallen;
     int valfree, retval;
 
-    valfree = redis_serialize(redis_sock, z, &val, &vallen TSRMLS_CC);
+    valfree = redis_pack(redis_sock, z, &val, &vallen TSRMLS_CC);
     retval = redis_cmd_append_sstr(str, val, vallen);
     if (valfree) efree(val);
 
@@ -1245,7 +1245,7 @@ PHP_REDIS_API void redis_string_response(INTERNAL_FUNCTION_PARAMETERS, RedisSock
     }
     IF_NOT_ATOMIC() {
         zval zv, *z = &zv;
-        if (redis_unserialize(redis_sock, response, response_len, z TSRMLS_CC)) {
+        if (redis_unpack(redis_sock, response, response_len, z TSRMLS_CC)) {
 #if (PHP_MAJOR_VERSION < 7)
             MAKE_STD_ZVAL(z);
             *z = zv;
@@ -1255,7 +1255,7 @@ PHP_REDIS_API void redis_string_response(INTERNAL_FUNCTION_PARAMETERS, RedisSock
             add_next_index_stringl(z_tab, response, response_len);
         }
     } else {
-        if (!redis_unserialize(redis_sock, response, response_len, return_value TSRMLS_CC)) {
+        if (!redis_unpack(redis_sock, response, response_len, return_value TSRMLS_CC)) {
             RETVAL_STRINGL(response, response_len);
         }
     }
@@ -1383,6 +1383,7 @@ redis_sock_create(char *host, int host_len, unsigned short port,
     redis_sock->read_timeout = read_timeout;
 
     redis_sock->serializer = REDIS_SERIALIZER_NONE;
+    redis_sock->compression = 0;
     redis_sock->mode = ATOMIC;
     redis_sock->head = NULL;
     redis_sock->current = NULL;
@@ -1681,7 +1682,7 @@ redis_mbulk_reply_loop(INTERNAL_FUNCTION_PARAMETERS, RedisSock *redis_sock,
             (unserialize == UNSERIALIZE_VALS && i % 2 != 0)
         );
         zval zv, *z = &zv;
-        if (unwrap && redis_unserialize(redis_sock, line, len, z TSRMLS_CC)) {
+        if (unwrap && redis_unpack(redis_sock, line, len, z TSRMLS_CC)) {
 #if (PHP_MAJOR_VERSION < 7)
             MAKE_STD_ZVAL(z);
             *z = zv;
@@ -1728,7 +1729,7 @@ PHP_REDIS_API int redis_mbulk_reply_assoc(INTERNAL_FUNCTION_PARAMETERS, RedisSoc
         response = redis_sock_read(redis_sock, &response_len TSRMLS_CC);
         if(response != NULL) {
             zval zv0, *z = &zv0;
-            if (redis_unserialize(redis_sock, response, response_len, z TSRMLS_CC)) {
+            if (redis_unpack(redis_sock, response, response_len, z TSRMLS_CC)) {
 #if (PHP_MAJOR_VERSION < 7)
                 MAKE_STD_ZVAL(z);
                 *z = zv0;
@@ -1792,6 +1793,58 @@ PHP_REDIS_API void redis_free_socket(RedisSock *redis_sock)
     }
     efree(redis_sock->host);
     efree(redis_sock);
+}
+
+PHP_REDIS_API int
+redis_pack(RedisSock *redis_sock, zval *z, char **val, strlen_t *val_len TSRMLS_DC)
+{
+    char *data;
+    int valfree;
+    strlen_t len;
+    zval z_fun, z_ret, z_arg;
+
+    valfree = redis_serialize(redis_sock, z, &data, &len TSRMLS_CC);
+    if (redis_sock->compression) {
+        ZVAL_STRINGL(&z_fun, "gzencode", sizeof("gzencode") - 1);
+        ZVAL_STRINGL(&z_arg, data, len);
+
+        call_user_function(EG(function_table), NULL, &z_fun, &z_ret, 1, &z_arg);
+        zval_dtor(&z_fun);
+        zval_dtor(&z_arg);
+
+        if (Z_TYPE(z_ret) == IS_STRING) {
+            if (valfree) efree(data);
+            *val = estrndup(Z_STRVAL(z_ret), Z_STRLEN(z_ret));
+            *val_len = Z_STRLEN(z_ret);
+            zval_dtor(&z_ret);
+            return 1;
+        }
+    }
+    *val = data;
+    *val_len = len;
+    return valfree;
+}
+
+PHP_REDIS_API int
+redis_unpack(RedisSock *redis_sock, const char *val, int val_len, zval *z_ret TSRMLS_DC)
+{
+    int ret;
+    zval z_fun, zv, z_arg;
+
+    if (redis_sock->compression) {
+        ZVAL_STRINGL(&z_fun, "gzdecode", sizeof("gzdecode") - 1);
+        ZVAL_STRINGL(&z_arg, val, val_len);
+        call_user_function(EG(function_table), NULL, &z_fun, &zv, 1, &z_arg);
+        zval_dtor(&z_fun);
+        zval_dtor(&z_arg);
+
+        if (Z_TYPE(zv) == IS_STRING) {
+            int ret = redis_unserialize(redis_sock, Z_STRVAL(zv), Z_STRLEN(zv), z_ret TSRMLS_CC);
+            zval_dtor(&zv);
+            return ret;
+        }
+    }
+    return redis_unserialize(redis_sock, val, val_len, z_ret TSRMLS_CC);
 }
 
 PHP_REDIS_API int
